@@ -1,9 +1,8 @@
 name: Chat Keepalive
-
 on:
   schedule:
-    - cron: '*/10 * * * *'    # every 10 minutes
-  workflow_dispatch:          # allow manual run from the Actions tab
+    - cron: '*/10 * * * *'   # every 10 minutes (UTC)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,10 +11,22 @@ jobs:
   ping-chat:
     runs-on: ubuntu-latest
     steps:
-      - name: POST to internal keepalive endpoint
+      - name: POST keepalive with retries
         run: |
-          curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
-            -X POST "https://https://terminal-chat-backend-tesla77.onrender.com/internal/keepalive" \
-            -H "x-keepalive-token: ${CHAT_TOKEN}"
+          set -e
+          for i in 1 2 3; do
+            code=$(curl -sS --max-time 20 -o resp.txt -w "%{http_code}" \
+              -X POST "https://terminal-chat-backend-tesla77.onrender.com/internal/keepalive" \
+              -H "x-keepalive-token: ${CHAT_TOKEN}")
+            echo "Attempt $i -> HTTP $code"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              echo "Success"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "---- Response (truncated) ----"
+          head -c 300 resp.txt || true
+          exit 1
         env:
           CHAT_TOKEN: ${{ secrets.CHAT_KEEPALIVE_TOKEN }}
