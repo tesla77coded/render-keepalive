@@ -19,7 +19,7 @@ jobs:
           payload=$(jq -n --argjson v $((RANDOM%2)) '{is_completed: ($v==1)}')
           for i in 1 2 3; do
             code=$(curl -sS --max-time 20 -o resp.txt -w "%{http_code}" \
-              -X PATCH "https://https://todolist-xdzk.onrender.com/api/tasks/${TODO_TASK_ID}" \
+              -X PATCH "https://todolist-xdzk.onrender.com/api/tasks/${TODO_TASK_ID}" \
               -H "Authorization: Bearer ${TODO_JWT}" \
               -H "Content-Type: application/json" \
               -d "$payload")
