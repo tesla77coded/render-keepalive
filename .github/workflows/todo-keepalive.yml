@@ -7,9 +7,6 @@ on:
 permissions:
   contents: read
 
-env:
-  TODO_URL: ${{ vars.TODO_URL }}   # e.g. https://<your-todo>.onrender.com
-
 jobs:
   ping-todo:
     runs-on: ubuntu-latest
@@ -17,7 +14,7 @@ jobs:
       - name: PUT dummy task (touches Redis via controller)
         run: |
           set -e
-          URL="${TODO_URL}/api/v1/tasks/${TODO_TASK_ID}"
+          URL="https://todolist-xdzk.onrender.com/api/v1/tasks/${TODO_TASK_ID}"
           echo "Hitting: $URL"
           for i in 1 2 3; do
             code=$(curl -sS --max-time 20 -o resp.txt -w "%{http_code}" \
