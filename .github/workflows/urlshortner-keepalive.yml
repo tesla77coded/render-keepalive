@@ -1,0 +1,32 @@
+name: URL Shortener Keepalive
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-urlshort:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST keepalive with retries
+        run: |
+          set -e
+          for i in 1 2 3; do
+            code=$(curl -sS --max-time 20 -o resp.txt -w "%{http_code}" \
+              -X POST "https://url-shortner-ap09.onrender.com/internal/keepalive" \
+              -H "x-keepalive-token: ${URLSHORT_TOKEN}")
+            echo "Attempt $i -> HTTP $code"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              echo "Success"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "---- Response (first 300 bytes) ----"
+          head -c 300 resp.txt || true
+          exit 1
+        env:
+          URLSHORT_TOKEN: ${{ secrets.URLSHORT_KEEPALIVE_TOKEN }}
