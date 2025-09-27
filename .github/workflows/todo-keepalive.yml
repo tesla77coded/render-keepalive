@@ -1,0 +1,38 @@
+
+name: Todo Keepalive
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-todo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PATCH dummy task (touches Redis via controller)
+        run: |
+          set -e
+          # Flip completion state each run to ensure a DB write
+          payload=$(jq -n --argjson v $((RANDOM%2)) '{is_completed: ($v==1)}')
+          for i in 1 2 3; do
+            code=$(curl -sS --max-time 20 -o resp.txt -w "%{http_code}" \
+              -X PATCH "https://https://todolist-xdzk.onrender.com/api/tasks/${TODO_TASK_ID}" \
+              -H "Authorization: Bearer ${TODO_JWT}" \
+              -H "Content-Type: application/json" \
+              -d "$payload")
+            echo "Attempt $i -> HTTP $code"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              echo "Success"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "---- Response (truncated) ----"
+          head -c 300 resp.txt || true
+          exit 1
+        env:
+          TODO_JWT: ${{ secrets.TODO_KEEPALIVE_JWT }}
+          TODO_TASK_ID: ${{ secrets.TODO_KEEPALIVE_TASK_ID }}
