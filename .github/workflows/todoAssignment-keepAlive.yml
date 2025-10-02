@@ -29,49 +29,46 @@ jobs:
           echo "Login URL: $LOGIN_URL"
           echo "Tasks URL: $TASKS_URL"
 
-          # write login JSON to a temp file (avoids YAML/quote issues)
           printf '%s' "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}" > /tmp/login_payload.json
 
-          # helper: extract token from JSON using python
+          # A more robust, recursive helper to find the token
           extract_token() {
             python3 - <<'PY' || return 1
           import sys, json
           try:
               data = json.load(sys.stdin)
-          except Exception:
+          except json.JSONDecodeError:
               sys.exit(1)
-          # common direct fields
-          for k in ("token","jwt","accessToken","access_token","access","authToken"):
-              v = data.get(k) if isinstance(data, dict) else None
-              if isinstance(v, str) and v.strip():
-                  print(v.strip()); sys.exit(0)
-          # nested common containers
-          for k in ("data","user","auth"):
-              nested = data.get(k) if isinstance(data, dict) else None
-              if isinstance(nested, dict):
-                  for kk in ("token","jwt","accessToken","access_token"):
-                      v = nested.get(kk)
-                      if isinstance(v, str) and v.strip():
-                          print(v.strip()); sys.exit(0)
-          # search for any JWT-like string (three '.' parts)
-          def find_jwt(obj):
+
+          def find_token_recursively(obj):
+              # Case 1: If it's a dictionary, check for common token keys
               if isinstance(obj, dict):
-                  for val in obj.values():
-                      r = find_jwt(val)
-                      if r: return r
+                  for key in ("token", "jwt", "accessToken", "access_token", "access", "authToken", "Token"):
+                      value = obj.get(key)
+                      if isinstance(value, str) and value.strip():
+                          return value.strip()
+                  # If not found, recurse into the dictionary's values
+                  for value in obj.values():
+                      token = find_token_recursively(value)
+                      if token:
+                          return token
+              # Case 2: If it's a list, recurse into its items
               elif isinstance(obj, list):
-                  for val in obj:
-                      r = find_jwt(val)
-                      if r: return r
-              elif isinstance(obj, str):
-                  parts = obj.split('.')
-                  if len(parts) >= 3:
-                      return obj
+                  for item in obj:
+                      token = find_token_recursively(item)
+                      if token:
+                          return token
+              # Case 3: Fallback for a string that looks like a JWT
+              elif isinstance(obj, str) and obj.count('.') >= 2:
+                  return obj
               return None
-          r = find_jwt(data)
-          if r:
-              print(r); sys.exit(0)
-          sys.exit(1)
+
+          token = find_token_recursively(data)
+          if token:
+              print(token)
+              sys.exit(0)
+          else:
+              sys.exit(1)
           PY
           }
 
@@ -91,23 +88,16 @@ jobs:
                 break
               else
                 echo "Login returned 2xx but token not found. Response snippet:"
-                head -c 400 "${login_resp_file}" || true
+                head -c 500 "${login_resp_file}" || true
                 exit 1
               fi
             fi
-
-            if [ "$http_code" -eq 401 ] || [ "$http_code" -eq 403 ]; then
-              echo "Login unauthorized (HTTP $http_code). Check repository secrets."
-              head -c 400 "${login_resp_file}" || true
-              exit 1
-            fi
-
             sleep 4
           done
 
           if [ -z "${token:-}" ]; then
             echo "Failed to login and extract token after retries."
-            head -c 400 "${login_resp_file}" || true
+            head -c 500 "${login_resp_file}" || true
             exit 1
           fi
 
@@ -120,18 +110,11 @@ jobs:
               -H "Authorization: Bearer ${token}" || true)
             echo "Tasks HTTP $http_code"
             if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-              echo "Tasks fetch success (HTTP $http_code). Response snippet:"
-              head -c 300 "${tasks_resp_file}" || true
+              echo "Tasks fetch success (HTTP $http_code)."
               exit 0
-            fi
-            if [ "$http_code" -eq 401 ] || [ "$http_code" -eq 403 ]; then
-              echo "Tasks request unauthorized (HTTP $http_code). Token may be invalid for this user/owner."
-              head -c 400 "${tasks_resp_file}" || true
-              exit 1
             fi
             sleep 4
           done
 
-          echo "Failed to fetch tasks after retries. Response snippet:"
-          head -c 500 "${tasks_resp_file}" || true
+          echo "Failed to fetch tasks after retries."
           exit 1
