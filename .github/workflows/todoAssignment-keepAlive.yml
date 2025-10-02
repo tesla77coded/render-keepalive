@@ -3,7 +3,7 @@ name: TodoBackend - Login then GET /api/v1/tasks (Keepalive)
 on:
   schedule:
     - cron: '*/12 * * * *'
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -35,44 +35,44 @@ jobs:
           # helper: extract token from JSON using python
           extract_token() {
             python3 - <<'PY' || return 1
-import sys, json
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-# common direct fields
-for k in ("token","jwt","accessToken","access_token","access","authToken"):
-    v = data.get(k) if isinstance(data, dict) else None
-    if isinstance(v, str) and v.strip():
-        print(v.strip()); sys.exit(0)
-# nested common containers
-for k in ("data","user","auth"):
-    nested = data.get(k) if isinstance(data, dict) else None
-    if isinstance(nested, dict):
-        for kk in ("token","jwt","accessToken","access_token"):
-            v = nested.get(kk)
-            if isinstance(v, str) and v.strip():
-                print(v.strip()); sys.exit(0)
-# search for any JWT-like string (three '.' parts)
-def find_jwt(obj):
-    if isinstance(obj, dict):
-        for val in obj.values():
-            r = find_jwt(val)
-            if r: return r
-    elif isinstance(obj, list):
-        for val in obj:
-            r = find_jwt(val)
-            if r: return r
-    elif isinstance(obj, str):
-        parts = obj.split('.')
-        if len(parts) >= 3:
-            return obj
-    return None
-r = find_jwt(data)
-if r:
-    print(r); sys.exit(0)
-sys.exit(1)
-PY
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(1)
+          # common direct fields
+          for k in ("token","jwt","accessToken","access_token","access","authToken"):
+              v = data.get(k) if isinstance(data, dict) else None
+              if isinstance(v, str) and v.strip():
+                  print(v.strip()); sys.exit(0)
+          # nested common containers
+          for k in ("data","user","auth"):
+              nested = data.get(k) if isinstance(data, dict) else None
+              if isinstance(nested, dict):
+                  for kk in ("token","jwt","accessToken","access_token"):
+                      v = nested.get(kk)
+                      if isinstance(v, str) and v.strip():
+                          print(v.strip()); sys.exit(0)
+          # search for any JWT-like string (three '.' parts)
+          def find_jwt(obj):
+              if isinstance(obj, dict):
+                  for val in obj.values():
+                      r = find_jwt(val)
+                      if r: return r
+              elif isinstance(obj, list):
+                  for val in obj:
+                      r = find_jwt(val)
+                      if r: return r
+              elif isinstance(obj, str):
+                  parts = obj.split('.')
+                  if len(parts) >= 3:
+                      return obj
+              return None
+          r = find_jwt(data)
+          if r:
+              print(r); sys.exit(0)
+          sys.exit(1)
+          PY
           }
 
           login_resp_file="/tmp/login_resp.json"
