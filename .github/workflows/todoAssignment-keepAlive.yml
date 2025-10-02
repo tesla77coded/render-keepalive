@@ -11,14 +11,14 @@ permissions:
 jobs:
   keepalive-login-gettasks:
     runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://todobackendassignment-wy0n.onrender.com
+      LOGIN_PATH: /api/v1/users/login
+      TASKS_PATH: /api/v1/tasks
+      EMAIL: ${{ secrets.TODO_KEEPALIVE_EMAIL }}
+      PASSWORD: ${{ secrets.TODO_KEEPALIVE_PASSWORD }}
     steps:
       - name: Keepalive: login + get tasks (with retries)
-        env:
-          BASE_URL: https://todobackendassignment-wy0n.onrender.com
-          LOGIN_PATH: /api/v1/users/login           # adjust if your login route differs
-          TASKS_PATH: /api/v1/tasks
-          EMAIL: ${{ secrets.TODO_KEEPALIVE_EMAIL }}   # service account email/username (set as repo secret)
-          PASSWORD: ${{ secrets.TODO_KEEPALIVE_PASSWORD }} # service account password (set as repo secret)
         run: |
           set -euo pipefail
 
@@ -28,7 +28,7 @@ jobs:
           echo "Login URL: $LOGIN_URL"
           echo "Tasks URL: $TASKS_URL"
 
-          # helper to extract token robustly from JSON
+          # helper: extract token robustly from JSON using python
           extract_token() {
             python3 - <<'PY' || return 1
 import sys, json
@@ -65,15 +65,19 @@ sys.exit(1)
 PY
           }
 
-          login_resp_file=login_resp.json
+          login_resp_file="login_resp.json"
           token=""
 
           # 1) Login with retries
           for i in 1 2 3; do
             echo "Login attempt $i..."
+            # Use heredoc for JSON body to avoid escaping issues
             http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${login_resp_file}" -X POST "${LOGIN_URL}" \
               -H "Content-Type: application/json" \
-              -d "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}" || true)
+              --data-binary @- <<JSON || true
+{"email":"${EMAIL}","password":"${PASSWORD}"}
+JSON
+)
             echo "Login HTTP $http_code"
             if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
               if token=$(cat "${login_resp_file}" | extract_token); then
@@ -102,7 +106,7 @@ PY
           fi
 
           # 2) GET /tasks with retries
-          tasks_resp_file=tasks_resp.json
+          tasks_resp_file="tasks_resp.json"
           for i in 1 2 3; do
             echo "GET /tasks attempt $i..."
             http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${tasks_resp_file}" -X GET "${TASKS_URL}" \
