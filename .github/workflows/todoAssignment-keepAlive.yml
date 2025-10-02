@@ -2,7 +2,7 @@ name: TodoBackend - Login then GET /api/v1/tasks (Keepalive)
 
 on:
   schedule:
-    - cron: '*/12 * * * *'   # every 12 minutes
+    - cron: '*/12 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,7 @@ jobs:
       PASSWORD: ${{ secrets.TODO_KEEPALIVE_PASSWORD }}
     steps:
       - name: Keepalive: login + get tasks (with retries)
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -28,15 +29,23 @@ jobs:
           echo "Login URL: $LOGIN_URL"
           echo "Tasks URL: $TASKS_URL"
 
-          # helper: extract token robustly from JSON using python
+          # write login JSON to a temp file (avoids YAML/quote issues)
+          printf '%s' "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}" > /tmp/login_payload.json
+
+          # helper: extract token from JSON using python
           extract_token() {
             python3 - <<'PY' || return 1
 import sys, json
-data = json.load(sys.stdin)
-for k in ("token","jwt","accessToken","access_token","access","data","authToken"):
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+# common direct fields
+for k in ("token","jwt","accessToken","access_token","access","authToken"):
     v = data.get(k) if isinstance(data, dict) else None
     if isinstance(v, str) and v.strip():
         print(v.strip()); sys.exit(0)
+# nested common containers
 for k in ("data","user","auth"):
     nested = data.get(k) if isinstance(data, dict) else None
     if isinstance(nested, dict):
@@ -44,6 +53,7 @@ for k in ("data","user","auth"):
             v = nested.get(kk)
             if isinstance(v, str) and v.strip():
                 print(v.strip()); sys.exit(0)
+# search for any JWT-like string (three '.' parts)
 def find_jwt(obj):
     if isinstance(obj, dict):
         for val in obj.values():
@@ -65,26 +75,22 @@ sys.exit(1)
 PY
           }
 
-          login_resp_file="login_resp.json"
+          login_resp_file="/tmp/login_resp.json"
           token=""
 
           # 1) Login with retries
           for i in 1 2 3; do
             echo "Login attempt $i..."
-            # Use heredoc for JSON body to avoid escaping issues
             http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${login_resp_file}" -X POST "${LOGIN_URL}" \
               -H "Content-Type: application/json" \
-              --data-binary @- <<JSON || true
-{"email":"${EMAIL}","password":"${PASSWORD}"}
-JSON
-)
+              --data-binary @/tmp/login_payload.json || true)
             echo "Login HTTP $http_code"
             if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
               if token=$(cat "${login_resp_file}" | extract_token); then
                 echo "Login success; token extracted."
                 break
               else
-                echo "Login returned 2xx but token not found. Dumping small snippet for debug:"
+                echo "Login returned 2xx but token not found. Response snippet:"
                 head -c 400 "${login_resp_file}" || true
                 exit 1
               fi
@@ -106,7 +112,7 @@ JSON
           fi
 
           # 2) GET /tasks with retries
-          tasks_resp_file="tasks_resp.json"
+          tasks_resp_file="/tmp/tasks_resp.json"
           for i in 1 2 3; do
             echo "GET /tasks attempt $i..."
             http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${tasks_resp_file}" -X GET "${TASKS_URL}" \
