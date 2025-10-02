@@ -3,7 +3,7 @@ name: TodoBackend - Login then GET /api/v1/tasks (Keepalive)
 on:
   schedule:
     - cron: '*/12 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       EMAIL: ${{ secrets.TODO_KEEPALIVE_EMAIL }}
       PASSWORD: ${{ secrets.TODO_KEEPALIVE_PASSWORD }}
     steps:
-      - name: 'Keepalive: login + get tasks (with retries)'
+      - name: Keepalive: login + get tasks (with retries)
         shell: bash
         run: |
           set -euo pipefail
@@ -29,92 +29,168 @@ jobs:
           echo "Login URL: $LOGIN_URL"
           echo "Tasks URL: $TASKS_URL"
 
+          # write login JSON to a temp file (avoids YAML/quote issues)
           printf '%s' "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\"}" > /tmp/login_payload.json
 
-          # A more robust, recursive helper to find the token
-          extract_token() {
-            python3 - <<'PY' || return 1
-          import sys, json
-          try:
-              data = json.load(sys.stdin)
-          except json.JSONDecodeError:
-              sys.exit(1)
-
-          def find_token_recursively(obj):
-              # Case 1: If it's a dictionary, check for common token keys
-              if isinstance(obj, dict):
-                  for key in ("token", "jwt", "accessToken", "access_token", "access", "authToken", "Token"):
-                      value = obj.get(key)
-                      if isinstance(value, str) and value.strip():
-                          return value.strip()
-                  # If not found, recurse into the dictionary's values
-                  for value in obj.values():
-                      token = find_token_recursively(value)
-                      if token:
-                          return token
-              # Case 2: If it's a list, recurse into its items
-              elif isinstance(obj, list):
-                  for item in obj:
-                      token = find_token_recursively(item)
-                      if token:
-                          return token
-              # Case 3: Fallback for a string that looks like a JWT
-              elif isinstance(obj, str) and obj.count('.') >= 2:
-                  return obj
-              return None
-
-          token = find_token_recursively(data)
-          if token:
-              print(token)
-              sys.exit(0)
-          else:
-              sys.exit(1)
-          PY
+          # helper: try extract token from JSON body (jq if available, else python)
+          extract_token_from_body() {
+            if command -v jq >/dev/null 2>&1; then
+              # Try common fields using jq; will output raw string without quotes if present
+              for key in token jwt accessToken access_token access authToken; do
+                val=$(jq -r "if .${key} then .${key} else empty end" /tmp/login_resp.json 2>/dev/null || true)
+                if [ -n "$val" ] && [ "$val" != "null" ] && [ "$val" != "***" ]; then
+                  printf '%s' "$val"
+                  return 0
+                fi
+              done
+              # nested containers
+              for nested in data user auth; do
+                for key in token jwt accessToken access_token; do
+                  val=$(jq -r "if .${nested}.${key} then .${nested}.${key} else empty end" /tmp/login_resp.json 2>/dev/null || true)
+                  if [ -n "$val" ] && [ "$val" != "null" ] && [ "$val" != "***" ]; then
+                    printf '%s' "$val"
+                    return 0
+                  fi
+                done
+              done
+              # last resort: find any string with two dots (JWT-like)
+              val=$(jq -r 'paths(scalars) as $p | getpath($p) | select(type=="string") | select(test("\\."))' /tmp/login_resp.json 2>/dev/null | head -n1 || true)
+              if [ -n "$val" ] && [ "$val" != "***" ]; then
+                printf '%s' "$val"
+                return 0
+              fi
+              return 1
+            else
+              # fallback to python-based extractor
+              python3 - <<'PY' || return 1
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for k in ("token","jwt","accessToken","access_token","access","authToken"):
+    v = data.get(k) if isinstance(data, dict) else None
+    if isinstance(v, str) and v.strip() and v.strip() != "***":
+        print(v.strip()); sys.exit(0)
+for k in ("data","user","auth"):
+    nested = data.get(k) if isinstance(data, dict) else None
+    if isinstance(nested, dict):
+        for kk in ("token","jwt","accessToken","access_token"):
+            v = nested.get(kk)
+            if isinstance(v, str) and v.strip() and v.strip() != "***":
+                print(v.strip()); sys.exit(0)
+def find_jwt(obj):
+    if isinstance(obj, dict):
+        for val in obj.values():
+            r = find_jwt(val)
+            if r: return r
+    elif isinstance(obj, list):
+        for val in obj:
+            r = find_jwt(val)
+            if r: return r
+    elif isinstance(obj, str):
+        parts = obj.split('.')
+        if len(parts) >= 3 and obj.strip() != "***":
+            return obj
+    return None
+r = find_jwt(data)
+if r:
+    print(r); sys.exit(0)
+sys.exit(1)
+PY
+            fi
           }
 
           login_resp_file="/tmp/login_resp.json"
+          login_headers_file="/tmp/login_headers.txt"
           token=""
+          cookies=""
 
-          # 1) Login with retries
+          # 1) Login with retries (capture headers + body)
           for i in 1 2 3; do
             echo "Login attempt $i..."
-            http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${login_resp_file}" -X POST "${LOGIN_URL}" \
+            http_code=$(curl -sS --max-time 20 -w "%{http_code}" -D "$login_headers_file" -o "$login_resp_file" -X POST "$LOGIN_URL" \
               -H "Content-Type: application/json" \
               --data-binary @/tmp/login_payload.json || true)
             echo "Login HTTP $http_code"
+
             if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-              if token=$(cat "${login_resp_file}" | extract_token); then
-                echo "Login success; token extracted."
-                break
-              else
-                echo "Login returned 2xx but token not found. Response snippet:"
-                head -c 500 "${login_resp_file}" || true
-                exit 1
+              # Try to extract token from body first
+              if token=$(extract_token_from_body </tmp/login_resp.json 2>/dev/null || true); then
+                if [ -n "$token" ]; then
+                  echo "Extracted token from body."
+                  break
+                fi
               fi
+
+              # If body did not give us a token, attempt to extract from Set-Cookie headers
+              cookies=$(awk 'BEGIN{ORS="; "} /^Set-Cookie:/ {sub(/^Set-Cookie: /,""); split($0,a,";"); print a[1] }' "$login_headers_file" | tr -d '\r' | sed 's/; $//')
+              if [ -n "$cookies" ]; then
+                echo "Found Set-Cookie header(s). Using cookies to authenticate follow-up request."
+                cookie_count=$(echo "$cookies" | awk -F'; ' '{print NF}')
+                echo "Cookie pieces: $cookie_count"
+                break
+              fi
+
+              # If neither body nor cookies produced a token, dump small snippet for debug and retry
+              echo "Login returned 2xx but token not found in body and no Set-Cookie header present. Response snippet:"
+              head -c 400 "$login_resp_file" || true
             fi
+
+            if [ "$http_code" -eq 401 ] || [ "$http_code" -eq 403 ]; then
+              echo "Login unauthorized (HTTP $http_code). Check repository secrets."
+              head -c 400 "$login_resp_file" || true
+              exit 1
+            fi
+
             sleep 4
           done
 
-          if [ -z "${token:-}" ]; then
-            echo "Failed to login and extract token after retries."
-            head -c 500 "${login_resp_file}" || true
+          # If we failed to obtain token or cookies, error early
+          if [ -z "${token:-}" ] && [ -z "${cookies:-}" ]; then
+            echo "Failed to obtain token or cookies from login response."
+            echo "Full response snippet:"
+            head -c 800 "$login_resp_file" || true
             exit 1
+          fi
+
+          # Compose auth header depending on what we have
+          AUTH_HEADER=""
+          COOKIE_HEADER=""
+          if [ -n "${token:-}" ]; then
+            AUTH_HEADER="Authorization: Bearer ${token}"
+          elif [ -n "${cookies:-}" ]; then
+            COOKIE_HEADER="Cookie: ${cookies}"
           fi
 
           # 2) GET /tasks with retries
           tasks_resp_file="/tmp/tasks_resp.json"
           for i in 1 2 3; do
             echo "GET /tasks attempt $i..."
-            http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "${tasks_resp_file}" -X GET "${TASKS_URL}" \
-              -H "Accept: application/json" \
-              -H "Authorization: Bearer ${token}" || true)
+            if [ -n "$AUTH_HEADER" ]; then
+              http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "$tasks_resp_file" -X GET "$TASKS_URL" \
+                -H "Accept: application/json" -H "$AUTH_HEADER" || true)
+            else
+              http_code=$(curl -sS --max-time 20 -w "%{http_code}" -o "$tasks_resp_file" -X GET "$TASKS_URL" \
+                -H "Accept: application/json" -H "$COOKIE_HEADER" || true)
+            fi
+
             echo "Tasks HTTP $http_code"
             if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-              echo "Tasks fetch success (HTTP $http_code)."
+              echo "Tasks fetch success (HTTP $http_code). Response snippet:"
+              head -c 300 "$tasks_resp_file" || true
               exit 0
             fi
+
+            if [ "$http_code" -eq 401 ] || [ "$http_code" -eq 403 ]; then
+              echo "Tasks request unauthorized (HTTP $http_code). Token/cookie may be invalid or not linked to tasks owner."
+              head -c 400 "$tasks_resp_file" || true
+              exit 1
+            fi
+
             sleep 4
           done
 
-          echo "Failed to fetch tasks after retries."
+          echo "Failed to fetch tasks after retries. Response snippet:"
+          head -c 500 "$tasks_resp_file" || true
           exit 1
