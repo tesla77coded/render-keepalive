@@ -17,11 +17,12 @@ jobs:
       TASKS_PATH: /api/v1/tasks
       EMAIL: ${{ secrets.TODO_KEEPALIVE_EMAIL }}
       PASSWORD: ${{ secrets.TODO_KEEPALIVE_PASSWORD }}
-  steps:
+    steps:
       - name: 'Keepalive: login + get tasks (with retries)'
         shell: bash
         run: |
           set -euo pipefail
+
           LOGIN_URL="${BASE_URL}${LOGIN_PATH}"
           TASKS_URL="${BASE_URL}${TASKS_PATH}?archived=false"
 
